@@ -3,64 +3,78 @@
 # exit script if return code != 0
 set -e
 
-# set arch for base image
-OS_ARCH="x86-64"
+# release tag name from buildx arg, stripped of build ver using string manipulation
+RELEASETAG="${1}"
 
-# construct snapshot date (cannot use todays as archive wont exist) and set url for archive.
-# note: for arch linux arm archive repo that the snapshot date has to be at least 2 days
-# previous as the mirror from live to the archive for arm packages is slow
-snapshot_date=$(date -d "2 days ago" +%Y/%m/%d)
+# get target arch from first parameter (defined in Dockerfile as arg)
+TARGETARCH="${2}"
 
-# now set pacman to use snapshot for packages for snapshot date
-if [[ "${OS_ARCH}" == "aarch64" ]]; then
-	echo 'Server = http://tardis.tiny-vps.com/aarm/repos/'"${snapshot_date}"'/$arch/$repo' > '/etc/pacman.d/mirrorlist'
-	echo 'Server = http://eu.mirror.archlinuxarm.org/$arch/$repo' >> '/etc/pacman.d/mirrorlist'
-else
-	echo 'Server = https://archive.archlinux.org/repos/'"${snapshot_date}"'/$repo/os/$arch' > '/etc/pacman.d/mirrorlist'
-	echo 'Server = http://archive.virtapi.org/repos/'"${snapshot_date}"'/$repo/os/$arch' >> '/etc/pacman.d/mirrorlist'
+if [[ -z "${RELEASETAG}" ]]; then
+	echo "[warn] Release tag name from build arg is empty, exiting script..."
+	exit 1
 fi
 
-echo "[info] content of arch mirrorlist file"
-cat '/etc/pacman.d/mirrorlist'
+if [[ -z "${TARGETARCH}" ]]; then
+	echo "[warn] Target architecture name from build arg is empty, exiting script..."
+	exit 1
+fi
+
+# construct snapshot date (cannot use todays as archive wont exist) and set url for archive.
+# note: for arch linux arm archive repo that the snapshot date has to be at least 5 days
+# previous as the mirror from live to the archive for arm packages is slow
+snapshot_date=$(date -d "5 days ago" +%Y/%m/%d)
+
+# define path to mirrorlist file
+mirrorlist_filepath='/etc/pacman.d/mirrorlist'
+
+# blank mirrorlist file
+rm -f "${mirrorlist_filepath}"
+
+# write RELEASETAG to file to record the release tag used to build the image
+echo "BASE_RELEASE_TAG=${RELEASETAG}" >> '/etc/image-release'
+
+# now set pacman to use snapshot for packages for snapshot date
+if [[ "${TARGETARCH}" == "arm64" ]]; then
+	server_list='tardis.tiny-vps.com/aarm alaa.ad24.cz'
+	for server in ${server_list}; do
+		echo "Server = http://${server}/repos/${snapshot_date}/\$arch/\$repo" >> "${mirrorlist_filepath}"
+	done
+elif [[ "${TARGETARCH}" == "amd64" ]]; then
+	server_list='europe.archive.pkgbuild.com america.archive.pkgbuild.com asia.archive.pkgbuild.com'
+	for server in ${server_list}; do
+		echo "Server = https://${server}/repos/${snapshot_date}/\$repo/os/\$arch" >> "${mirrorlist_filepath}"
+	done
+else
+	echo "[warn] Target architecture name '${TARGETARCH}' from build arg is empty or unexpected, exiting script..."
+	exit 1
+fi
+
+echo "[info] content of arch mirrorlist file..."
+cat "${mirrorlist_filepath}"
 
 # reset gpg (not required when source is bootstrap tarball, but keeping for historic reasons)
 rm -rf '/etc/pacman.d/gnupg/' '/root/.gnupg/' || true
 
-# dns resolution reconfigure is required due to the tarball extraction
-# overwriting the /etc/resolv.conf, thus we then need to fix this up
-# before we can continue to build the image.
-#echo "[info] Setting DNS resolvers to Cloudflare..."
-#echo "nameserver 1.1.1.1" > '/etc/resolv.conf' || true
-#echo "nameserver 1.0.0.1" >> '/etc/resolv.conf' || true
-
 # refresh gpg keys
 gpg --refresh-keys
 
-# initialise key for pacman and populate keys
-if [[ "${OS_ARCH}" == "aarch64" ]]; then
-	pacman-key --init && pacman-key --populate archlinuxarm
+if [[ "${TARGETARCH}" == "arm64" ]]; then
+	pacman_arch="archlinuxarm"
 else
-	pacman-key --init && pacman-key --populate archlinux
+	pacman_arch="archlinux"
 fi
 
-# force use of protocol http and ipv4 only for keyserver (defaults to hkp)
-echo "no-greeting" > '/etc/pacman.d/gnupg/gpg.conf'
-echo "no-permission-warning" >> '/etc/pacman.d/gnupg/gpg.conf'
-echo "lock-never" >> '/etc/pacman.d/gnupg/gpg.conf'
-echo "keyserver https://keyserver.ubuntu.com" >> '/etc/pacman.d/gnupg/gpg.conf'
-echo "keyserver-options timeout=10" >> '/etc/pacman.d/gnupg/gpg.conf'
+# initialise key for pacman and populate keys
+pacman-key --init && pacman-key --populate "${pacman_arch}"
 
-# perform pacman refresh with retries (required as keyservers are unreliable)
-count=0
-echo "[info] refreshing keys for pacman..."
-until pacman-key --refresh-keys || (( count++ >= 3 ))
-do
-	echo "[warn] failed to refresh keys for pacman, retrying in 30 seconds..."
-	sleep 30s
-done
+echo "[info] set pacman to ignore signatures - required due to rolling release nature of archlinux"
+sed -i -E "s~^SigLevel(\s+)?=.*~SigLevel = Never~g" '/etc/pacman.conf'
+
+echo "[info] set pacman to disable sandbox - required as sandbox prevents packages from installing"
+sed -i -E "s~^#DisableSandbox~DisableSandbox~g" '/etc/pacman.conf'
 
 # force pacman db refresh and install sed package (used to do package folder exclusions)
-pacman -Sy sed --noconfirm
+pacman -Sy sed --debug --noconfirm
 
 # configure pacman to not extract certain folders from packages being installed
 # this is done as we strip out locale, man, docs etc when we build the arch-scratch image
@@ -114,9 +128,6 @@ eval "${pacman_remove_unneeded_packages} || true"
 
 echo "[info] Adding required packages to pacman ignore package list to prevent upgrades..."
 
-# add coreutils to pacman ignore list to prevent permission denied issue on Docker Hub -
-# https://gitlab.archlinux.org/archlinux/archlinux-docker/-/issues/32
-#
 # add filesystem to pacman ignore list to prevent buildx issues with
 # /etc/hosts and /etc/resolv.conf being read only, see issue -
 # https://github.com/moby/buildkit/issues/1267#issuecomment-768903038
@@ -127,10 +138,10 @@ echo "[info] Displaying contents of pacman config file, showing ignored packages
 cat '/etc/pacman.conf'
 
 echo "[info] Updating packages currently installed..."
-pacman -Syu --noconfirm
+pacman -Syu --debug --noconfirm
 
 echo "[info] Install base group and additional packages..."
-pacman -S base awk sed grep gzip supervisor nano vi ldns moreutils net-tools dos2unix unzip unrar htop jq openssl-1.0 rsync --noconfirm
+pacman -S base which awk sed grep gzip supervisor nano vi ldns moreutils net-tools dos2unix unzip unrar htop jq openssl-1.1 rsync openbsd-netcat --noconfirm
 
 echo "[info] set locale..."
 echo en_GB.UTF-8 UTF-8 > '/etc/locale.gen'
@@ -151,19 +162,27 @@ chmod -R 775 '/home/nobody'
 # set user "nobody" home directory (needs defining for pycharm, and possibly other apps)
 usermod -d /home/nobody nobody
 
+# ensure there is no expiry date for user nobody
+usermod --expiredate= nobody
+
 # set shell for user nobody
 chsh -s /bin/bash nobody
 
-# find latest tini release tag from github
-curl --connect-timeout 5 --max-time 600 --retry 5 --retry-delay 0 --retry-max-time 60 -o "/tmp/tini_release_tag" -L "https://github.com/krallin/tini/releases"
-tini_release_tag=$(cat /tmp/tini_release_tag | grep -P -o -m 1 '(?<=/krallin/tini/releases/tag/)[^"]+')
+# find latest dumb-init release tag from github
+curl --connect-timeout 5 --max-time 600 --retry 5 --retry-delay 0 --retry-max-time 60 -o "/tmp/dumbinit_release_tag" -L "https://github.com/Yelp/dumb-init/releases"
+dumbinit_release_tag=$(grep -P -o -m 1 '(?<=/Yelp/dumb-init/releases/tag/)[^"]+' < /tmp/dumbinit_release_tag)
 
-# download tini, used to do graceful exit when docker stop issued and correct reaping of zombie processes.
-if [[ "${OS_ARCH}" == "aarch64" ]]; then
-	curl --connect-timeout 5 --max-time 600 --retry 5 --retry-delay 0 --retry-max-time 60 -o "/usr/bin/tini" -L "https://github.com/krallin/tini/releases/download/${tini_release_tag}/tini-arm64" && chmod +x "/usr/bin/tini"
+# remove first character 'v' from string, used for url to download binary
+dumbinit_release_tag_strip="${dumbinit_release_tag#?}"
+
+if [[ "${TARGETARCH}" == "arm64" ]]; then
+	dumbinit_arch="aarch64"
 else
-	curl --connect-timeout 5 --max-time 600 --retry 5 --retry-delay 0 --retry-max-time 60 -o "/usr/bin/tini" -L "https://github.com/krallin/tini/releases/download/${tini_release_tag}/tini-amd64" && chmod +x "/usr/bin/tini"
+	dumbinit_arch="x86_64"
 fi
+
+# download dumb-init, used to do graceful exit when docker stop issued and correct reaping of zombie processes.
+curl --connect-timeout 5 --max-time 600 --retry 5 --retry-delay 0 --retry-max-time 60 -o "/usr/bin/dumb-init" -L "https://github.com/Yelp/dumb-init/releases/download/${dumbinit_release_tag}/dumb-init_${dumbinit_release_tag_strip}_${dumbinit_arch}" && chmod +x "/usr/bin/dumb-init"
 
 # identify if base-devel package installed
 if pacman -Qg "base-devel" > /dev/null ; then
@@ -188,6 +207,7 @@ rm -rf /var/cache/* \
 
 # additional cleanup for base only
 rm -rf /root/* \
+'/boot/'* \
 /var/cache/pacman/pkg/* \
 /usr/lib/firmware \
 /usr/lib/modules \

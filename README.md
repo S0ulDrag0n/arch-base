@@ -12,10 +12,10 @@ Arch Linux base image built from "scratch". This image is set to a snapshot by u
 
 **Notes**
 
-This image includes Tini (https://github.com/krallin/tini) to ensure a clean shutdown and to correctly reap processes, Supervisor (http://supervisord.org/) is also installed to help monitor and run child processes.
+This image includes dumb-init (https://github.com/Yelp/dumb-init) to ensure a clean shutdown and to correctly reap processes, Supervisor (http://supervisord.org/) is also installed to help monitor and run child processes.
 
 If you appreciate my work, then please consider buying me a beer  :D
 
 [![PayPal donation](https://www.paypal.com/en_US/i/btn/btn_donate_SM.gif)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=MM5E27UX6AUU4)
 
-[Documentation](https://github.com/binhex/documentation) | [Support Forum](http://lime-technology.com/forum/index.php?topic=45811.0)
+[Documentation](https://github.com/binhex/documentation) | [Support Forum](http://forums.unraid.net/index.php?topic=45811.0)
